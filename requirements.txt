@@ -61,6 +61,7 @@ pypdf2==3.0.1
 
 # Data Validation
 email-validator==2.1.0
+jsonschema==4.21.1
 
 # Utilities
 python-dateutil==2.8.2
