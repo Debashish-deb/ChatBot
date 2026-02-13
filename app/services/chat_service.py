@@ -7,6 +7,7 @@ from sqlalchemy import select
 from jsonschema import validate, ValidationError
 from app.services.llm_service import llm_service
 from app.services.mcp_orchestrator import mcp_orchestrator
+from app.services.intelligence import intelligence_service
 from app.mcp.tools.registry import tool_registry
 from app.models.schemas import ChatMessage
 from app.models.database import Conversation, Message, User, ToolExecution
@@ -35,8 +36,8 @@ class ChatService:
         conversation_id: str, 
         mcp_tools: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Process a single tool call with validation, retries, and persistence"""
-        tool_name = tool_call.function.name
+        """Process a single tool call with validation, fuzzy matching, and persistence"""
+        original_tool_name = tool_call.function.name
         tool_args = json.loads(tool_call.function.arguments)
         
         execution_id = str(uuid.uuid4())
@@ -47,10 +48,22 @@ class ChatService:
         server_name = "local"
         
         try:
-            # 1. Find Tool Definition for validation
-            local_tool = tool_registry.get_tool(tool_name)
-            target_mcp_tool = next((t for t in mcp_tools if t["name"] == tool_name), None)
+            # 1. Resolve Tool (with Fuzzy Matching)
+            local_tool = tool_registry.get_tool(original_tool_name)
+            target_mcp_tool = next((t for t in mcp_tools if t["name"] == original_tool_name), None)
             
+            resolved_name = original_tool_name
+            if not local_tool and not target_mcp_tool:
+                # Try fuzzy match
+                available_names = [t["name"] for t in tool_registry.list_tools()] + [t["name"] for t in mcp_tools]
+                fuzzy_name = intelligence_service.find_fuzzy_match(original_tool_name, available_names)
+                if fuzzy_name:
+                    resolved_name = fuzzy_name
+                    local_tool = tool_registry.get_tool(resolved_name)
+                    target_mcp_tool = next((t for t in mcp_tools if t["name"] == resolved_name), None)
+                    logger.info(f"Corrected tool name '{original_tool_name}' to '{resolved_name}'")
+
+            # 2. Get Schema for validation
             schema = None
             if local_tool:
                 schema = local_tool.input_schema
@@ -58,34 +71,30 @@ class ChatService:
                 schema = target_mcp_tool.get("input_schema")
                 server_name = target_mcp_tool.get("server_name", "unknown")
 
-            # 2. Strict Schema Validation
+            # 3. Strict Schema Validation
             if schema:
                 try:
                     validate(instance=tool_args, schema=schema)
                 except ValidationError as ve:
                     status = "error"
-                    error_msg = f"Schema validation failed: {ve.message}"
+                    error_msg = f"Schema validation failed: {ve.message}. Please check parameter types and required fields."
                     result_content = {"error": error_msg}
             
-            # 3. Execution (with simple retry logic for transient errors)
+            # 4. Execution
             if status == "success":
-                for attempt in range(2): # 2 attempts
-                    try:
-                        if local_tool:
-                            result_content = await local_tool.execute(**tool_args)
-                        elif target_mcp_tool:
-                            result_content = await mcp_orchestrator.call_mcp_tool(server_name, tool_name, tool_args)
-                        else:
-                            status = "error"
-                            error_msg = f"Tool {tool_name} not found"
-                            result_content = {"error": error_msg}
-                        break # Success
-                    except Exception as e:
-                        if attempt == 0:
-                            logger.warning(f"Retrying tool {tool_name} after error: {e}")
-                            await asyncio.sleep(1)
-                            continue
-                        raise # Rethrow on last attempt
+                try:
+                    if local_tool:
+                        result_content = await local_tool.execute(**tool_args)
+                    elif target_mcp_tool:
+                        result_content = await mcp_orchestrator.call_mcp_tool(server_name, resolved_name, tool_args)
+                    else:
+                        status = "error"
+                        error_msg = f"Tool '{original_tool_name}' not found."
+                        result_content = {"error": error_msg}
+                except Exception as e:
+                    status = "error"
+                    error_msg = str(e)
+                    result_content = {"error": error_msg}
 
         except Exception as e:
             status = "error"
@@ -94,12 +103,12 @@ class ChatService:
         
         duration_ms = int((time.time() - start_time) * 1000)
         
-        # 4. Persistence
+        # 5. Persistence
         async with get_db_context() as db:
             execution = ToolExecution(
                 id=execution_id,
                 conversation_id=conversation_id,
-                tool_name=tool_name,
+                tool_name=resolved_name,
                 server_name=server_name,
                 arguments=tool_args,
                 result=result_content,
@@ -114,8 +123,9 @@ class ChatService:
         return {
             "role": "tool",
             "tool_call_id": tool_call.id,
-            "name": tool_name,
-            "content": json.dumps(result_content)
+            "name": resolved_name,
+            "content": json.dumps(result_content),
+            "status": status # Pass status for self-correction logic
         }
 
     async def generate_response(
@@ -138,13 +148,21 @@ class ChatService:
             db.add(user_msg)
             await db.commit()
 
+        # 1. Intent Detection & System Prompt Enhancement
+        intent = intelligence_service.detect_intent(messages[-1].content)
         formatted_messages = [{"role": m.role, "content": m.content} for m in messages]
         
+        if intent == "planning":
+            formatted_messages.insert(0, {"role": "system", "content": "The user is asking for a plan or strategy. Be comprehensive and structured in your response."})
+        elif intent == "coding":
+            formatted_messages.insert(0, {"role": "system", "content": "The user is asking for coding help. Provide clean, efficient code with explanations if needed."})
+
         # Fetch tools
         local_tools = tool_registry.list_tools()
         mcp_tools = await mcp_orchestrator.list_all_tools()
         combined_tools = local_tools + mcp_tools
         
+        # Initial call
         response = await llm_service.chat_completion(
             messages=formatted_messages,
             tools=combined_tools
@@ -152,23 +170,44 @@ class ChatService:
         
         message = response.choices[0].message
         
-        # Handle tool calls in PARALLEL
-        if message.tool_calls:
+        # Handle tool calls with SELF-CORRECTION loop
+        max_corrections = 2
+        for _ in range(max_corrections):
+            if not message.tool_calls:
+                break
+                
             formatted_messages.append(message.model_dump())
             
-            # Execute all tool calls concurrently
+            # Parallel execution
             tool_tasks = [
                 self._process_tool_call(tc, conversation.id, mcp_tools) 
                 for tc in message.tool_calls
             ]
             tool_results = await asyncio.gather(*tool_tasks)
             
-            # Add all results to history
-            formatted_messages.extend(tool_results)
+            # Prepare results for history (remove internal 'status' before sending to LLM)
+            has_error = False
+            error_details = []
+            for res in tool_results:
+                status = res.pop("status")
+                if status == "error":
+                    has_error = True
+                    error_details.append(res["content"])
+                formatted_messages.append(res)
             
-            # Final response after parallel tool execution(s)
-            response = await llm_service.chat_completion(messages=formatted_messages)
+            if has_error:
+                # Inject a correction hint
+                formatted_messages.append({
+                    "role": "system", 
+                    "content": f"Some tools failed with errors: {error_details}. Please analyze the errors and refactor your request if possible."
+                })
+            
+            # Call LLM again
+            response = await llm_service.chat_completion(messages=formatted_messages, tools=combined_tools)
             message = response.choices[0].message
+            
+            if not has_error: # If no error, we proceed or exit loop if no more tool calls
+                break
 
         # Save assistant response
         async with get_db_context() as db:
@@ -202,8 +241,12 @@ class ChatService:
             db.add(user_msg)
             await db.commit()
 
+        # Simple intent detection for streaming too
+        intent = intelligence_service.detect_intent(messages[-1].content)
         formatted_messages = [{"role": m.role, "content": m.content} for m in messages]
-        
+        if intent != "general":
+            formatted_messages.insert(0, {"role": "system", "content": f"Intent detected: {intent}. Tailor your response accordingly."})
+
         collected_tokens = []
         async for token in llm_service.stream_completion(formatted_messages):
             collected_tokens.append(token)
