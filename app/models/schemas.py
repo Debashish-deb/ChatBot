@@ -11,7 +11,12 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
-    model: Optional[str] = "gpt-4o"
+    model: Optional[str] = None
+    conversation_id: Optional[str] = None
+    temperature: Optional[float] = 0.7
+
+class StreamChatRequest(ChatRequest):
+    pass
 
 class ChatResponse(BaseModel):
     id: str
@@ -20,3 +25,24 @@ class ChatResponse(BaseModel):
     model: str
     choices: List[dict]
     usage: Optional[dict] = None
+
+class UserBase(BaseModel):
+    email: str
+    full_name: Optional[str] = None
+
+class UserCreate(UserBase):
+    password: str
+
+class UserResponse(UserBase):
+    id: str
+    is_active: bool
+    tier: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None

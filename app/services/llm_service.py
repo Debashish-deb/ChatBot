@@ -10,6 +10,10 @@ class LLMProvider(ABC):
     async def chat_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
         pass
 
+    @abstractmethod
+    async def stream_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
+        pass
+
 class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: str, base_url: Optional[str] = None):
         kwargs = {"api_key": api_key}
@@ -25,6 +29,16 @@ class OpenAIProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
         return await self.client.chat.completions.create(**kwargs)
 
+    async def stream_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
+        model = DEFAULT_MODEL_MAP[ModelProvider.OPENAI]
+        kwargs = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+        
+        async for chunk in await self.client.chat.completions.create(**kwargs):
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
 class DeepSeekProvider(LLMProvider):
     def __init__(self, api_key: str):
         # DeepSeek is OpenAI compatible
@@ -37,6 +51,16 @@ class DeepSeekProvider(LLMProvider):
             kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
         return await self.client.chat.completions.create(**kwargs)
 
+    async def stream_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
+        model = DEFAULT_MODEL_MAP[ModelProvider.DEEPSEEK]
+        kwargs = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+        
+        async for chunk in await self.client.chat.completions.create(**kwargs):
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
 class OllamaProvider(LLMProvider):
     def __init__(self, base_url: str):
         # Ollama provides an OpenAI compatible endpoint at /v1
@@ -48,6 +72,16 @@ class OllamaProvider(LLMProvider):
         if tools:
             kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
         return await self.client.chat.completions.create(**kwargs)
+
+    async def stream_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
+        model = DEFAULT_MODEL_MAP[ModelProvider.OLLAMA]
+        kwargs = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+        
+        async for chunk in await self.client.chat.completions.create(**kwargs):
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
 
 class AnthropicProvider(LLMProvider):
     def __init__(self, api_key: str):
@@ -85,6 +119,24 @@ class AnthropicProvider(LLMProvider):
         # Map Anthropic response to a format similar to OpenAI for internal consistency
         # In a real app, we'd use a more robust common adapter
         return self._map_to_common_format(response)
+
+    async def stream_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
+        model = DEFAULT_MODEL_MAP[ModelProvider.ANTHROPIC]
+        system_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
+        user_messages = [m for m in messages if m["role"] != "system"]
+        
+        kwargs = {
+            "model": model,
+            "messages": user_messages,
+            "max_tokens": 4096,
+            "stream": True,
+        }
+        if system_msg:
+            kwargs["system"] = system_msg
+        
+        async with self.client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                yield text
 
     def _map_to_common_format(self, response: Any) -> Any:
         # Simplified mapping for demonstration

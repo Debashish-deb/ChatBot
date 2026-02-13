@@ -1,121 +1,71 @@
-# 🤖 MCP ChatBot
+# 🚀 MCP ChatBot - Professional Enterprise-Grade System
 
-A high-performance, production-ready ChatBot built with **FastAPI** and integrated with the **Model Context Protocol (MCP)**. This project supports multiple LLM providers, including **DeepSeek**, **Ollama**, and **Claude**.
+A production-ready, feature-rich chatbot integrated with Model Context Protocol (MCP) and multiple LLM providers.
 
----
+## ✨ Key Features
 
-## 🚀 Key Features
+- **Multi-LLM Support**: Seamlessly switch between DeepSeek, Ollama, Claude, and OpenAI.
+- **MCP Integration**: Unified orchestrator for connecting to multiple external MCP servers.
+- **Production-Grade Infrastructure**:
+  - **Persistence**: PostgreSQL backend for users, conversations, and message history.
+  - **Caching**: Redis-backed session management and rate limiting.
+  - **Security**: JWT & API Key authentication with RBAC and Tier-based quotas.
+  - **Streaming**: Token-by-token delivery via Server-Sent Events (SSE) and WebSockets.
+  - **Observability**: Prometheus metrics, health checks, and structured JSON logging.
+  - **Deployment**: Dockerized with Kubernetes manifests and CI/CD pipelines.
 
-- **Multi-LLM Support**: Seamlessly switch between **DeepSeek**, **Ollama**, **Claude**, and **OpenAI**.
-- **Modular Architecture**: Clean separation of concerns with dedicated layers for API, Services, Models, and MCP logic.
-- **MCP Integration**: Dynamic tool discovery and execution via the Model Context Protocol.
-- **FastAPI Pro**: Lifespan management, structured logging, global exception handling, and Pydantic v2 validation.
-- **RESTful API**: Versioned endpoints (`/api/v1`) with full OpenAPI documentation.
-- **Containerized**: Ready-to-use `Dockerfile` and `docker-compose.yml`.
+## 🛠️ Tech Stack
 
----
+- **Framework**: FastAPI (Python 3.10+)
+- **LLM SDKs**: OpenAI, Anthropic
+- **Database**: PostgreSQL (SQLAlchemy Async), Redis
+- **DevOps**: Docker, Kubernetes, GitHub Actions
+- **Monitoring**: Prometheus, Structlog
 
-## 🛠️ Getting Started
+## 🚀 Quick Start
 
-### Prerequisites
+### 1. Prerequisites
 
 - Python 3.10+
-- [Docker](https://www.docker.com/) (optional)
-- API Key for your preferred provider (DeepSeek, Claude, or OpenAI) OR local Ollama instance.
+- Docker & Docker Compose
+- PostgreSQL & Redis (or use Docker)
 
-### Local Installation
+### 2. Installation
 
-1. **Clone the repository**:
-
-   ```bash
-   git clone <repo-url>
-   cd ChatBot
-   ```
-
-2. **Create a virtual environment**:
-
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Environment Setup**:
-
-   ```bash
-   cp .env.example .env
-   # Edit .env and set LLM_PROVIDER and relevant API keys
-   ```
-
-5. **Run the application**:
-
-   ```bash
-   python -m app.main
-   ```
-
----
-
-## ⚙️ Configuration
-
-Configure your LLM provider in the `.env` file:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LLM_PROVIDER` | `deepseek`, `ollama`, `anthropic`, or `openai` | `deepseek` |
-| `DEEPSEEK_API_KEY` | Your DeepSeek API Key | - |
-| `ANTHROPIC_API_KEY` | Your Anthropic (Claude) API Key | - |
-| `OLLAMA_BASE_URL` | Base URL for your Ollama instance | `http://localhost:11434` |
-
----
-
-## 📖 Usage
-
-### API Endpoints
-
-- **GET `/`**: Welcome message and version info.
-- **GET `/api/v1/health`**: Service health status.
-- **POST `/api/v1/chat`**: Primary chat interface.
-
-### Example Request
-
-```json
-POST /api/v1/chat
-{
-  "messages": [
-    {"role": "user", "content": "What is the status of my internal software budget?"}
-  ]
-}
+```bash
+git clone https://github.com/Debashish-deb/ChatBot.git
+cd ChatBot
+pip install -r requirements.txt
 ```
 
----
+### 3. Configuration
 
-## 🛠️ Extending with MCP Tools
+Copy `.env.production.example` to `.env` and fill in your secrets:
 
-This project features a sample `BudgetTool` in `app/mcp/tools/budget_tool.py`.
+```bash
+cp .env.production.example .env
+```
 
-1. Create a class inheriting from `BaseMCPTool`.
-2. Implement required properties and the `execute` async function.
-3. Register it in `tool_registry`.
+### 4. Running Locally
 
-The `ChatService` orchestrator automatically manages tool detection and execution across all supported LLM providers.
+```bash
+uvicorn app.main:app --reload
+```
 
----
+## 📖 API Documentation
+
+Once running, visit:
+
+- **Swagger UI**: `http://localhost:8000/docs`
+- **ReDoc**: `http://localhost:8000/redoc`
+- **Metrics**: `http://localhost:8000/metrics`
 
 ## 🧪 Testing
-
-Run tests using Pytest:
 
 ```bash
 pytest
 ```
 
----
+## 🚢 Deployment
 
-## 📜 License
-
-Created with ❤️ using Antigravity.
+See [QUICK_START_GUIDE.md](QUICK_START_GUIDE.md) for detailed deployment instructions for Docker and Kubernetes.
