@@ -14,15 +14,10 @@ class LLMProvider(ABC):
     async def stream_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
         pass
 
-class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key: str, base_url: Optional[str] = None):
-        kwargs = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        self.client = AsyncOpenAI(**kwargs)
-
     async def chat_completion(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
         model = DEFAULT_MODEL_MAP[ModelProvider.OPENAI]
+        
+        # OpenAI handles multimodal content parts in the same structure as our schemas
         kwargs = {"model": model, "messages": messages}
         if tools:
             kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
@@ -100,13 +95,40 @@ class AnthropicProvider(LLMProvider):
                     "input_schema": t["input_schema"]
                 })
 
-        # Anthropic separates system message
+        # Anthropic separates system message and requires specific block formatting
         system_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
-        user_messages = [m for m in messages if m["role"] != "system"]
+        
+        formatted_messages = []
+        for m in [m for m in messages if m["role"] != "system"]:
+            content = m["content"]
+            if isinstance(content, list):
+                # Convert our ContentPart schema to Anthropic blocks
+                blocks = []
+                for part in content:
+                    if part["type"] == "text":
+                        blocks.append({"type": "text", "text": part["text"]})
+                    elif part["type"] == "image_url":
+                        # Anthropic expects bits/data for images, OpenAI expects URL
+                        # In our system, if it's base64, we extract it
+                        data = part["image_url"]["url"]
+                        if data.startswith("data:"):
+                            media_type, base64_data = data.split(";base64,")
+                            media_type = media_type.replace("data:", "")
+                            blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": base64_data
+                                }
+                            })
+                formatted_messages.append({"role": m["role"], "content": blocks})
+            else:
+                formatted_messages.append({"role": m["role"], "content": content})
 
         kwargs = {
             "model": model,
-            "messages": user_messages,
+            "messages": formatted_messages,
             "max_tokens": 4096,
         }
         if system_msg:

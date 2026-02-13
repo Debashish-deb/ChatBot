@@ -1,7 +1,7 @@
 import json
 import uuid
 import asyncio
-from typing import List, Dict, Any, AsyncGenerator, Optional
+from typing import List, Dict, Any, AsyncGenerator, Optional, Union
 from datetime import datetime
 from sqlalchemy import select
 from jsonschema import validate, ValidationError
@@ -9,7 +9,8 @@ from app.services.llm_service import llm_service
 from app.services.mcp_orchestrator import mcp_orchestrator
 from app.services.intelligence import intelligence_service
 from app.mcp.tools.registry import tool_registry
-from app.models.schemas import ChatMessage
+import app.mcp.tools # Trigger registration
+from app.models.schemas import ChatMessage, ContentPart
 from app.models.database import Conversation, Message, User, ToolExecution
 from app.database import get_db_context
 from app.logging_config import logger
@@ -128,6 +129,12 @@ class ChatService:
             "status": status # Pass status for self-correction logic
         }
 
+    def _format_content(self, content: Union[str, List[ContentPart]]) -> Any:
+        """Helper to format content for DB and LLM"""
+        if isinstance(content, list):
+            return [p.model_dump() if hasattr(p, 'model_dump') else p for p in content]
+        return content
+
     async def generate_response(
         self, 
         messages: List[ChatMessage], 
@@ -138,19 +145,26 @@ class ChatService:
     ) -> Dict[str, Any]:
         conversation = await self.get_or_create_conversation(user_id, conversation_id)
         
+        last_user_message = messages[-1]
+        
         # Save user message
         async with get_db_context() as db:
             user_msg = Message(
                 conversation_id=conversation.id,
                 role="user",
-                content=messages[-1].content
+                # Store content as JSON if it's a list for multimodal support
+                content=json.dumps(self._format_content(last_user_message.content)) if isinstance(last_user_message.content, list) else last_user_message.content
             )
             db.add(user_msg)
             await db.commit()
 
-        # 1. Intent Detection & System Prompt Enhancement
-        intent = intelligence_service.detect_intent(messages[-1].content)
-        formatted_messages = [{"role": m.role, "content": m.content} for m in messages]
+        # 1. Intent Detection (on text part of content)
+        text_content = last_user_message.content
+        if isinstance(text_content, list):
+            text_content = " ".join([p.text for p in text_content if p.type == "text"])
+        
+        intent = intelligence_service.detect_intent(text_content)
+        formatted_messages = [{"role": m.role, "content": self._format_content(m.content)} for m in messages]
         
         if intent == "planning":
             formatted_messages.insert(0, {"role": "system", "content": "The user is asking for a plan or strategy. Be comprehensive and structured in your response."})
@@ -232,18 +246,23 @@ class ChatService:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         conversation = await self.get_or_create_conversation(user_id, conversation_id)
         
+        last_user_message = messages[-1]
         async with get_db_context() as db:
             user_msg = Message(
                 conversation_id=conversation.id,
                 role="user",
-                content=messages[-1].content
+                content=json.dumps(self._format_content(last_user_message.content)) if isinstance(last_user_message.content, list) else last_user_message.content
             )
             db.add(user_msg)
             await db.commit()
 
-        # Simple intent detection for streaming too
-        intent = intelligence_service.detect_intent(messages[-1].content)
-        formatted_messages = [{"role": m.role, "content": m.content} for m in messages]
+        # Simple intent detection
+        text_content = last_user_message.content
+        if isinstance(text_content, list):
+            text_content = " ".join([p.text for p in text_content if p.type == "text" and p.text])
+            
+        intent = intelligence_service.detect_intent(text_content)
+        formatted_messages = [{"role": m.role, "content": self._format_content(m.content)} for m in messages]
         if intent != "general":
             formatted_messages.insert(0, {"role": "system", "content": f"Intent detected: {intent}. Tailor your response accordingly."})
 
@@ -286,7 +305,17 @@ class ChatService:
                 select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
             )
             messages = history_result.scalars().all()
-            chat_messages = [ChatMessage(role=m.role, content=m.content) for m in messages]
+            chat_messages = []
+            for m in messages:
+                content = m.content
+                # Try to parse as JSON for multimodal content
+                try:
+                    parsed_content = json.loads(content)
+                    if isinstance(parsed_content, list):
+                        content = parsed_content
+                except:
+                    pass
+                chat_messages.append(ChatMessage(role=m.role, content=content))
             
             return await self.generate_response(chat_messages, user_id, conversation_id, **kwargs)
 
@@ -296,7 +325,16 @@ class ChatService:
                 select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
             )
             messages = history_result.scalars().all()
-            chat_messages = [ChatMessage(role=m.role, content=m.content) for m in messages]
+            chat_messages = []
+            for m in messages:
+                content = m.content
+                try:
+                    parsed_content = json.loads(content)
+                    if isinstance(parsed_content, list):
+                        content = parsed_content
+                except:
+                    pass
+                chat_messages.append(ChatMessage(role=m.role, content=content))
             
             return await self.generate_response(chat_messages, user_id, conversation_id, **kwargs)
 

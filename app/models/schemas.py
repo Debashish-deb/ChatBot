@@ -5,8 +5,9 @@ class ChatMessage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
     role: str = Field(..., pattern="^(user|assistant|system|tool)$")
-    content: str
+    content: Union[str, List[ContentPart]]
     name: Optional[str] = None
+    tool_calls: Optional[List[Any]] = None
     tool_call_id: Optional[str] = None
 
 class ChatRequest(BaseModel):
@@ -14,17 +15,18 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     conversation_id: Optional[str] = None
     temperature: Optional[float] = 0.7
+    stream: Optional[bool] = False
 
 class StreamChatRequest(ChatRequest):
-    pass
+    stream: bool = True
 
 class ChatResponse(BaseModel):
     id: str
     object: str = "chat.completion"
     created: int
     model: str
-    choices: List[dict]
-    usage: Optional[dict] = None
+    choices: List[Dict[str, Any]]
+    usage: Dict[str, int] = None
 
 class UserBase(BaseModel):
     email: str
