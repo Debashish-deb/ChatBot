@@ -8,6 +8,8 @@ from jsonschema import validate, ValidationError
 from app.services.llm_service import llm_service
 from app.services.mcp_orchestrator import mcp_orchestrator
 from app.services.intelligence import intelligence_service
+from app.services.memory_service import memory_service
+from app.services.reflection_service import reflection_service
 from app.mcp.tools.registry import tool_registry
 import app.mcp.tools # Trigger registration
 from app.models.schemas import ChatMessage, ContentPart
@@ -161,15 +163,30 @@ class ChatService:
         # 1. Intent Detection (on text part of content)
         text_content = last_user_message.content
         if isinstance(text_content, list):
-            text_content = " ".join([p.text for p in text_content if p.type == "text"])
+            text_content = " ".join([p.text for p in text_content if p.type == "text" and p.text])
         
         intent = intelligence_service.detect_intent(text_content)
         formatted_messages = [{"role": m.role, "content": self._format_content(m.content)} for m in messages]
         
+        # 2. Context Management (Rolling Summaries)
+        summary = await memory_service.generate_rolling_summary(conversation.id, formatted_messages)
+        if summary:
+            # Inject summary into history to save tokens and maintain state
+            # In a real app, we'd prune older messages here
+            formatted_messages.insert(0, {"role": "system", "content": f"Conversation Summary (MCP): {summary}"})
+
+        # 3. Personalization & Tone Enhancement
+        async with get_db_context() as db:
+            user = await db.scalar(select(User).where(User.id == user_id))
+            if user and user.preferences:
+                pref_prompt = f"User Preferences: {json.dumps(user.preferences)}. Tailor tone and style accordingly."
+                formatted_messages.insert(0, {"role": "system", "content": pref_prompt})
+
+        # Inject system instructions based on intent
         if intent == "planning":
-            formatted_messages.insert(0, {"role": "system", "content": "The user is asking for a plan or strategy. Be comprehensive and structured in your response."})
+            formatted_messages.insert(0, {"role": "system", "content": "The user is asking for a plan or strategy. Be comprehensive and structured."})
         elif intent == "coding":
-            formatted_messages.insert(0, {"role": "system", "content": "The user is asking for coding help. Provide clean, efficient code with explanations if needed."})
+            formatted_messages.insert(0, {"role": "system", "content": "The user is asking for coding help. Provide clean, documented code."})
 
         # Fetch tools
         local_tools = tool_registry.list_tools()
@@ -184,7 +201,7 @@ class ChatService:
         
         message = response.choices[0].message
         
-        # Handle tool calls with SELF-CORRECTION loop
+        # 4. Tool Execution & Self-Correction Loop
         max_corrections = 2
         for _ in range(max_corrections):
             if not message.tool_calls:
@@ -199,7 +216,11 @@ class ChatService:
             ]
             tool_results = await asyncio.gather(*tool_tasks)
             
-            # Prepare results for history (remove internal 'status' before sending to LLM)
+            # Record tool outputs to memory for future RAG
+            for res in tool_results:
+                await memory_service.add_to_memory(conversation.id, res["content"])
+            
+            # Prepare results for history
             has_error = False
             error_details = []
             for res in tool_results:
@@ -210,18 +231,21 @@ class ChatService:
                 formatted_messages.append(res)
             
             if has_error:
-                # Inject a correction hint
                 formatted_messages.append({
                     "role": "system", 
-                    "content": f"Some tools failed with errors: {error_details}. Please analyze the errors and refactor your request if possible."
+                    "content": f"Some tools failed: {error_details}. Please attempt self-correction."
                 })
             
             # Call LLM again
             response = await llm_service.chat_completion(messages=formatted_messages, tools=combined_tools)
             message = response.choices[0].message
             
-            if not has_error: # If no error, we proceed or exit loop if no more tool calls
+            if not has_error:
                 break
+
+        # 5. Explicit Self-Reflection Turn (for complex intents)
+        if intent in ["planning", "coding"] and message.content:
+            message.content = await reflection_service.reflect(formatted_messages, message.content)
 
         # Save assistant response
         async with get_db_context() as db:
@@ -256,15 +280,16 @@ class ChatService:
             db.add(user_msg)
             await db.commit()
 
-        # Simple intent detection
+        # Simplified logic for streaming
         text_content = last_user_message.content
         if isinstance(text_content, list):
             text_content = " ".join([p.text for p in text_content if p.type == "text" and p.text])
             
         intent = intelligence_service.detect_intent(text_content)
         formatted_messages = [{"role": m.role, "content": self._format_content(m.content)} for m in messages]
+        
         if intent != "general":
-            formatted_messages.insert(0, {"role": "system", "content": f"Intent detected: {intent}. Tailor your response accordingly."})
+            formatted_messages.insert(0, {"role": "system", "content": f"Context: {intent} task. Optimize for depth and accuracy."})
 
         collected_tokens = []
         async for token in llm_service.stream_completion(formatted_messages):
@@ -290,6 +315,7 @@ class ChatService:
             "conversation_id": conversation.id
         }
 
+    # ... regenerate and continue conversation methods ...
     async def regenerate_last_response(self, conversation_id: str, user_id: str, **kwargs) -> Dict[str, Any]:
         async with get_db_context() as db:
             result = await db.execute(
@@ -308,13 +334,10 @@ class ChatService:
             chat_messages = []
             for m in messages:
                 content = m.content
-                # Try to parse as JSON for multimodal content
                 try:
                     parsed_content = json.loads(content)
-                    if isinstance(parsed_content, list):
-                        content = parsed_content
-                except:
-                    pass
+                    if isinstance(parsed_content, list): content = parsed_content
+                except: pass
                 chat_messages.append(ChatMessage(role=m.role, content=content))
             
             return await self.generate_response(chat_messages, user_id, conversation_id, **kwargs)
@@ -330,10 +353,8 @@ class ChatService:
                 content = m.content
                 try:
                     parsed_content = json.loads(content)
-                    if isinstance(parsed_content, list):
-                        content = parsed_content
-                except:
-                    pass
+                    if isinstance(parsed_content, list): content = parsed_content
+                except: pass
                 chat_messages.append(ChatMessage(role=m.role, content=content))
             
             return await self.generate_response(chat_messages, user_id, conversation_id, **kwargs)
