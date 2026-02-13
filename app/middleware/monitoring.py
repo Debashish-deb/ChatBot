@@ -351,10 +351,12 @@ async def health_check():
     # Check MCP servers
     try:
         from app.services.mcp_orchestrator import mcp_orchestrator
-        connected_servers = len(mcp_orchestrator._clients)
+        mcp_health = await mcp_orchestrator.check_health()
+        connected_servers = sum(1 for status in mcp_health.values() if status == "connected")
         health_status["checks"]["mcp"] = {
             "status": "healthy" if connected_servers > 0 else "degraded",
-            "connected_servers": connected_servers
+            "connected_servers": connected_servers,
+            "servers": mcp_health
         }
     except Exception as e:
         health_status["checks"]["mcp"] = {

@@ -3,6 +3,8 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from app.logging_config import logger
+import time
+from app.middleware.monitoring import mcp_tool_calls_total, mcp_tool_duration_seconds
 
 class MCPClient:
     def __init__(self, name: str, command: str, args: List[str] = None):
@@ -42,8 +44,36 @@ class MCPClient:
             tools.append(tool_dict)
         return tools
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: Dict[str, Any], timeout: float = 30.0) -> Any:
         if not self.session:
             raise Exception(f"MCP Client {self.name} not connected")
-        result = await self.session.call_tool(name, arguments)
-        return result.content
+        
+        start_time = time.time()
+        status = "success"
+        try:
+            # Add timeout support
+            result = await asyncio.wait_for(
+                self.session.call_tool(name, arguments),
+                timeout=timeout
+            )
+            return result.content
+        except asyncio.TimeoutError:
+            status = "timeout"
+            logger.error(f"MCP Tool call timeout: {self.name}.{name}")
+            raise
+        except Exception as e:
+            status = "error"
+            logger.error(f"MCP Tool call error: {self.name}.{name} - {str(e)}")
+            raise
+        finally:
+            duration = time.time() - start_time
+            # Record metrics
+            mcp_tool_calls_total.labels(
+                tool_name=name,
+                server_name=self.name,
+                status=status
+            ).inc()
+            mcp_tool_duration_seconds.labels(
+                tool_name=name,
+                server_name=self.name
+            ).observe(duration)

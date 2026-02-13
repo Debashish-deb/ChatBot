@@ -7,9 +7,10 @@ from app.services.llm_service import llm_service
 from app.services.mcp_orchestrator import mcp_orchestrator
 from app.mcp.tools.registry import tool_registry
 from app.models.schemas import ChatMessage
-from app.models.database import Conversation, Message, User
+from app.models.database import Conversation, Message, User, ToolExecution
 from app.database import get_db_context
 from app.logging_config import logger
+import time
 
 class ChatService:
     async def get_or_create_conversation(self, user_id: str, conversation_id: Optional[str] = None) -> Conversation:
@@ -65,12 +66,72 @@ class ChatService:
         
         message = response.choices[0].message
         
-        # Handle tool calls (simplified routing from previous version)
+        # Handle tool calls
         if message.tool_calls:
-            # In a real app, we'd loop through tool calls, execute, and call LLM again
-            # For brevity in this upgrade, we'll keep the logic but ensure persistence
-            pass 
+            formatted_messages.append(message.model_dump())
+            for tool_call in message.tool_calls:
+                tool_name = tool_call.function.name
+                tool_args = json.loads(tool_call.function.arguments)
+                
+                # Start execution record
+                execution_id = str(uuid.uuid4())
+                start_time = time.time()
+                status = "success"
+                error_msg = None
+                result_content = None
+                server_name = "local"
+                
+                try:
+                    # Routing logic
+                    local_tool = tool_registry.get_tool(tool_name)
+                    if local_tool:
+                        logger.info(f"Executing LOCAL tool: {tool_name}")
+                        result_content = await local_tool.execute(**tool_args)
+                    else:
+                        target_mcp_tool = next((t for t in mcp_tools if t["name"] == tool_name), None)
+                        if target_mcp_tool and "server_name" in target_mcp_tool:
+                            server_name = target_mcp_tool["server_name"]
+                            logger.info(f"Executing REMOTE MCP tool: {tool_name} on server: {server_name}")
+                            result_content = await mcp_orchestrator.call_mcp_tool(server_name, tool_name, tool_args)
+                        else:
+                            status = "error"
+                            error_msg = f"Tool {tool_name} not found"
+                            result_content = {"error": error_msg}
+                except Exception as e:
+                    status = "error"
+                    error_msg = str(e)
+                    result_content = {"error": error_msg}
+                
+                duration_ms = int((time.time() - start_time) * 1000)
+                
+                # Persist tool execution
+                async with get_db_context() as db:
+                    execution = ToolExecution(
+                        id=execution_id,
+                        conversation_id=conversation.id,
+                        tool_name=tool_name,
+                        server_name=server_name,
+                        arguments=tool_args,
+                        result=result_content,
+                        status=status,
+                        error_message=error_msg,
+                        duration_ms=duration_ms,
+                        completed_at=datetime.utcnow()
+                    )
+                    db.add(execution)
+                    await db.commit()
 
+                formatted_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_name,
+                    "content": json.dumps(result_content)
+                })
+            
+            # Final response after tool execution(s)
+            response = await llm_service.chat_completion(messages=formatted_messages)
+            message = response.choices[0].message
+            
         # Save assistant response
         async with get_db_context() as db:
             assistant_msg = Message(
