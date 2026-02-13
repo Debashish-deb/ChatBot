@@ -1,0 +1,19 @@
+[project]
+name = "mcp-chatbot"
+version = "0.1.0"
+description = "A professional MCP-integrated chatbot"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "mcp",
+    "pydantic>=2.0",
+    "pydantic-settings",
+    "httpx",
+    "openai"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-dotenv
+mcp[cli]>=1.0.0
+pydantic>=2.0
+pydantic-settings
+httpx
+openai
+anthropic
+pytest
+pytest-asyncio
